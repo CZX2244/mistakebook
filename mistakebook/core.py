@@ -11,9 +11,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -94,7 +93,6 @@ class MistakeBook:
         self._conn.executescript(SCHEMA)
         self._conn.commit()
 
-    # ------------------------------------------------------------------ utils
     def __enter__(self) -> "MistakeBook":
         return self
 
@@ -139,7 +137,6 @@ class MistakeBook:
         ).fetchone()
         return self._row_to_mistake(row) if row else None
 
-    # ------------------------------------------------------------------ CRUD
     def add(self, mistake: Mistake) -> int:
         """Insert a new mistake; returns its id. First review is due in 1 day."""
         now = self._now_iso()
@@ -195,7 +192,6 @@ class MistakeBook:
         self._conn.commit()
         return cur.rowcount > 0
 
-    # ------------------------------------------------------------------ review
     def review(
         self,
         mistake_id: int,
@@ -233,11 +229,10 @@ class MistakeBook:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    # ------------------------------------------------------------------ query
     def due(self, subject: Optional[str] = None, limit: int = 20) -> list[Mistake]:
         """Mistakes whose next_review is now or in the past (and not archived)."""
         now = self._now_iso()
-        sql = ("SELECT * FROM mistakes WHERE archived = 0 AND next_review <= ?")
+        sql = "SELECT * FROM mistakes WHERE archived = 0 AND next_review <= ?"
         params: list = [now]
         if subject:
             sql += " AND subject = ?"
@@ -280,7 +275,6 @@ class MistakeBook:
         params.append(limit)
         return [self._row_to_mistake(r) for r in self._conn.execute(sql, params)]
 
-    # ------------------------------------------------------------------ stats
     def stats(self) -> dict:
         c = self._conn
         total = c.execute("SELECT COUNT(*) FROM mistakes WHERE archived = 0").fetchone()[0]
@@ -311,9 +305,11 @@ class MistakeBook:
             )
         }
         total_reviews = c.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]
+        cutoff = (scheduler.utc_now() - timedelta(days=30)).isoformat()
         recent = c.execute(
             "SELECT result, COUNT(*) AS n FROM reviews "
-            "WHERE reviewed_at >= datetime('now', '-30 days') GROUP BY result"
+            "WHERE reviewed_at >= ? GROUP BY result",
+            (cutoff,),
         ).fetchall()
         return {
             "total": total,
@@ -326,10 +322,10 @@ class MistakeBook:
             "last_30d_reviews": {r["result"]: r["n"] for r in recent},
         }
 
-    # ------------------------------------------------------------------ export
     def iter_all(self, include_archived: bool = True) -> Iterator[Mistake]:
         sql = "SELECT * FROM mistakes"
         if not include_archived:
             sql += " WHERE archived = 0"
+        sql += " ORDER BY id"
         for row in self._conn.execute(sql):
             yield self._row_to_mistake(row)
