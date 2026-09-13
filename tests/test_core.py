@@ -39,7 +39,6 @@ def test_add_and_get(book):
     assert m.knowledge_points == ["有理数", "分数运算"]
     assert m.stage == 0 and m.mastery == 0
     assert not m.archived
-    # 首次复习应在 ~1 天后
     assert m.next_review - scheduler.utc_now() < timedelta(days=1, minutes=1)
 
 
@@ -55,7 +54,6 @@ def test_archive(book):
     mid = book.add(make_mistake())
     assert book.archive(mid)
     assert book.get(mid).archived
-    # 归档后不出现在 due 里
     assert all(m.id != mid for m in book.due())
     assert book.archive(mid, archived=False)
     assert not book.get(mid).archived
@@ -87,9 +85,7 @@ def test_review_missing_returns_none(book):
 
 def test_due_only_returns_overdue(book):
     mid = book.add(make_mistake())
-    # 新录入的明天才到期
     assert all(m.id != mid for m in book.due())
-    # 手动把 next_review 改成过去
     past = (scheduler.utc_now() - timedelta(days=1)).isoformat()
     book._conn.execute("UPDATE mistakes SET next_review = ? WHERE id = ?", (past, mid))
     book._conn.commit()
@@ -117,3 +113,24 @@ def test_stats(book):
     assert s["by_subject"]["数学"] == 1
     assert s["by_subject"]["物理"] == 1
     assert s["by_error_cause"]["概念不清"] == 2
+
+
+def test_stats_30d_cutoff_uses_iso_format(book):
+    mid = book.add(make_mistake())
+    book.review(mid, "correct")
+    cutoff = scheduler.utc_now() - timedelta(days=30)
+    old_same_day = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
+    if old_same_day >= cutoff:
+        old_same_day = cutoff - timedelta(seconds=1)
+    book._conn.execute(
+        "UPDATE reviews SET reviewed_at = ? WHERE mistake_id = ?",
+        (old_same_day.isoformat(), mid),
+    )
+    book._conn.commit()
+    assert book.stats()["last_30d_reviews"] == {}
+
+
+def test_iter_all_is_deterministic(book):
+    first = book.add(make_mistake(subject="数学"))
+    second = book.add(make_mistake(subject="物理"))
+    assert [m.id for m in book.iter_all()] == [first, second]
