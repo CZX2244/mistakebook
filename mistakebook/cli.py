@@ -6,6 +6,7 @@ Usage:
     mistakebook review <id> --result correct|partial|wrong [--notes "..."]
     mistakebook search [--query "..."] [--subject "..."] [--cause "..."]
     mistakebook show <id>
+    mistakebook update <id> [fields]
     mistakebook archive <id> [--unarchive]
     mistakebook stats
     mistakebook export [--format csv|json] [--output path]
@@ -22,11 +23,18 @@ import json
 import os
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from .core import ERROR_CAUSES, Mistake, MistakeBook
 
 DEFAULT_DB = Path.home() / ".mistakebook" / "mistakebook.db"
+CSV_FIELDS = [
+    "id", "subject", "question_text", "correct_answer", "student_answer",
+    "analysis", "error_cause", "problem_type", "knowledge_points",
+    "page_location", "source_image", "mastery", "stage", "next_review",
+    "archived", "created_at", "updated_at",
+]
 
 
 def resolve_db(args) -> Path:
@@ -36,22 +44,40 @@ def resolve_db(args) -> Path:
     return Path(env) if env else DEFAULT_DB
 
 
+def _json_default(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mistake):
+        return mistake_to_dict(value)
+    raise TypeError(f"not serializable: {type(value)}")
+
+
+def _print_json(payload, *, file=None) -> None:
+    print(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default),
+        file=file or sys.stdout,
+    )
+
+
 def emit(args, payload) -> None:
-    """Print payload as JSON when --json is set, else call args.human(payload)."""
+    """Emit a successful payload in JSON or human-readable form."""
     if getattr(args, "json_out", False):
-        def default(o):
-            from datetime import datetime
-            if isinstance(o, datetime):
-                return o.isoformat()
-            if isinstance(o, Path):
-                return str(o)
-            if isinstance(o, Mistake):
-                d = asdict(o)
-                return d
-            raise TypeError(f"not serializable: {type(o)}")
-        print(json.dumps(payload, ensure_ascii=False, indent=2, default=default))
+        _print_json(payload)
     else:
         args.human(payload)
+
+
+def fail(args, code: str, message: str, **details) -> int:
+    """Emit a stable machine-readable error when --json is active."""
+    if getattr(args, "json_out", False):
+        error = {"code": code, "message": message}
+        error.update(details)
+        _print_json({"error": error}, file=sys.stderr)
+    else:
+        print(f"❌ {message}", file=sys.stderr)
+    return 1
 
 
 def mistake_to_dict(m: Mistake) -> dict:
@@ -60,6 +86,20 @@ def mistake_to_dict(m: Mistake) -> dict:
     d["created_at"] = m.created_at.isoformat() if m.created_at else None
     d["updated_at"] = m.updated_at.isoformat() if m.updated_at else None
     return d
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("必须是正整数")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("不能是负数")
+    return parsed
 
 
 # ------------------------------------------------------------- human printers
@@ -94,7 +134,7 @@ def human_mistake_detail(m: Mistake) -> None:
 
 
 def human_stats(s: dict) -> None:
-    print(f"错题总数: {s['total']}（已归档 {s['archived']}）")
+    print(f"在册错题: {s['total']}（已归档 {s['archived']}）")
     print(f"到期待复习: {s['due']}")
     print(f"累计复习次数: {s['total_reviews']}")
     if s["by_subject"]:
@@ -127,8 +167,10 @@ def cmd_add(args) -> int:
     with MistakeBook(resolve_db(args)) as book:
         mid = book.add(m)
         saved = book.get(mid)
-        emit(args, {"id": mid, "mistake": saved} if args.json_out else saved)
-    if not args.json_out:
+    if args.json_out:
+        _print_json({"id": mid, "mistake": mistake_to_dict(saved)})
+    else:
+        human_mistake_detail(saved)
         print(f"\n✅ 已录入 #{mid}，首次复习安排在明天。")
     return 0
 
@@ -146,10 +188,9 @@ def cmd_review(args) -> int:
             args.id, result=args.result,
             notes=args.notes or "", duration_seconds=args.duration,
         )
-        if updated is None:
-            print(f"❌ 找不到 #{args.id}", file=sys.stderr)
-            return 1
-        emit(args, mistake_to_dict(updated) if args.json_out else updated)
+    if updated is None:
+        return fail(args, "not_found", f"找不到 #{args.id}", id=args.id)
+    emit(args, mistake_to_dict(updated) if args.json_out else updated)
     return 0
 
 
@@ -169,31 +210,38 @@ def cmd_show(args) -> int:
     with MistakeBook(resolve_db(args)) as book:
         m = book.get(args.id)
         if m is None:
-            print(f"❌ 找不到 #{args.id}", file=sys.stderr)
-            return 1
-        if args.json_out:
-            payload = mistake_to_dict(m)
-            payload["reviews"] = book.reviews_for(args.id)
-            emit(args, payload)
-        else:
-            human_mistake_detail(m)
-            reviews = book.reviews_for(args.id)
-            if reviews:
-                print(f"\n复习记录（{len(reviews)} 次）:")
-                for r in reviews:
-                    print(f"  {r['reviewed_at'][:10]} {r['result']}"
-                          f" → 阶段 {r['stage_after']}"
-                          + (f" | {r['notes']}" if r["notes"] else ""))
+            return fail(args, "not_found", f"找不到 #{args.id}", id=args.id)
+        reviews = book.reviews_for(args.id)
+    if args.json_out:
+        payload = mistake_to_dict(m)
+        payload["reviews"] = reviews
+        _print_json(payload)
+    else:
+        human_mistake_detail(m)
+        if reviews:
+            print(f"\n复习记录（{len(reviews)} 次）:")
+            for r in reviews:
+                print(f"  {r['reviewed_at'][:10]} {r['result']}"
+                      f" → 阶段 {r['stage_after']}"
+                      + (f" | {r['notes']}" if r["notes"] else ""))
     return 0
 
 
 def cmd_archive(args) -> int:
+    archived = not args.unarchive
     with MistakeBook(resolve_db(args)) as book:
-        ok = book.archive(args.id, archived=not args.unarchive)
+        ok = book.archive(args.id, archived=archived)
         if not ok:
-            print(f"❌ 找不到 #{args.id}", file=sys.stderr)
-            return 1
-        print(f"✅ #{args.id} {'已恢复' if args.unarchive else '已归档'}")
+            return fail(args, "not_found", f"找不到 #{args.id}", id=args.id)
+        updated = book.get(args.id)
+    if args.json_out:
+        _print_json({
+            "id": args.id,
+            "archived": archived,
+            "mistake": mistake_to_dict(updated),
+        })
+    else:
+        print(f"✅ #{args.id} {'已归档' if archived else '已恢复'}")
     return 0
 
 
@@ -213,13 +261,20 @@ def cmd_update(args) -> int:
         fields["knowledge_points"] = [
             k.strip() for k in args.knowledge_points.split(",") if k.strip()]
     if not fields:
-        print("❌ 没有要更新的字段", file=sys.stderr)
-        return 1
+        return fail(args, "invalid_input", "没有要更新的字段")
+
     with MistakeBook(resolve_db(args)) as book:
         ok = book.update(args.id, **fields)
         if not ok:
-            print(f"❌ 找不到 #{args.id}", file=sys.stderr)
-            return 1
+            return fail(args, "not_found", f"找不到 #{args.id}", id=args.id)
+        updated = book.get(args.id)
+    if args.json_out:
+        _print_json({
+            "id": args.id,
+            "updated": True,
+            "mistake": mistake_to_dict(updated),
+        })
+    else:
         print(f"✅ #{args.id} 已更新")
     return 0
 
@@ -231,41 +286,54 @@ def cmd_stats(args) -> int:
     return 0
 
 
+def _write_csv(rows: list[dict], fh) -> None:
+    writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+    writer.writeheader()
+    for row in rows:
+        item = dict(row)
+        item["knowledge_points"] = ";".join(item["knowledge_points"])
+        writer.writerow({key: item.get(key) for key in CSV_FIELDS})
+
+
 def cmd_export(args) -> int:
     out = Path(args.output) if args.output else None
     with MistakeBook(resolve_db(args)) as book:
         rows = [mistake_to_dict(m) for m in book.iter_all(include_archived=True)]
-        if args.format == "json":
-            text = json.dumps(rows, ensure_ascii=False, indent=2)
-            if out:
-                out.write_text(text, encoding="utf-8")
+
+    if out:
+        try:
+            if args.format == "json":
+                out.write_text(
+                    json.dumps(rows, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
             else:
-                print(text)
-        else:  # csv
-            fieldnames = [
-                "id", "subject", "question_text", "correct_answer",
-                "student_answer", "analysis", "error_cause", "problem_type",
-                "knowledge_points", "page_location", "mastery", "stage",
-                "next_review", "archived", "created_at", "updated_at",
-            ]
-            if out:
-                fh = out.open("w", newline="", encoding="utf-8-sig")
-                close = True
-            else:
-                fh = sys.stdout
-                close = False
-            try:
-                writer = csv.DictWriter(fh, fieldnames=fieldnames)
-                writer.writeheader()
-                for r in rows:
-                    r = dict(r)
-                    r["knowledge_points"] = ";".join(r["knowledge_points"])
-                    writer.writerow({k: r.get(k) for k in fieldnames})
-            finally:
-                if close:
-                    fh.close()
-        if out:
+                with out.open("w", newline="", encoding="utf-8-sig") as fh:
+                    _write_csv(rows, fh)
+        except OSError as exc:
+            return fail(
+                args,
+                "export_failed",
+                f"导出失败: {exc}",
+                output=str(out),
+            )
+
+        if args.json_out:
+            _print_json({
+                "count": len(rows),
+                "format": args.format,
+                "output": str(out),
+            })
+        else:
             print(f"✅ 已导出 {len(rows)} 条到 {out}")
+        return 0
+
+    if args.json_out:
+        _print_json({"count": len(rows), "format": args.format, "items": rows})
+    elif args.format == "json":
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+    else:
+        _write_csv(rows, sys.stdout)
     return 0
 
 
@@ -291,11 +359,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--knowledge-points", help="知识点，逗号分隔，由宽到窄")
     sp.add_argument("--page", help="题号或页码位置")
     sp.add_argument("--image", help="原图路径")
-    sp.set_defaults(func=cmd_add, human=lambda m: human_mistake_detail(m))
+    sp.set_defaults(func=cmd_add, human=human_mistake_detail)
 
     sp = sub.add_parser("due", help="列出到期待复习的错题")
     sp.add_argument("--subject")
-    sp.add_argument("--limit", type=int, default=20)
+    sp.add_argument("--limit", type=_positive_int, default=20)
     sp.set_defaults(func=cmd_due, human=human_mistake_brief)
 
     sp = sub.add_parser("review", help="记录一次复习结果")
@@ -303,7 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--result", required=True,
                     choices=["correct", "partial", "wrong"])
     sp.add_argument("--notes")
-    sp.add_argument("--duration", type=int, help="用时（秒）")
+    sp.add_argument("--duration", type=_non_negative_int, help="用时（秒）")
     sp.set_defaults(func=cmd_review, human=human_mistake_detail)
 
     sp = sub.add_parser("search", help="检索错题")
@@ -313,7 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--knowledge-point")
     sp.add_argument("--problem-type")
     sp.add_argument("--all", action="store_true", help="包含已归档")
-    sp.add_argument("--limit", type=int, default=50)
+    sp.add_argument("--limit", type=_positive_int, default=50)
     sp.set_defaults(func=cmd_search, human=human_mistake_brief)
 
     sp = sub.add_parser("show", help="查看一条错题详情和复习历史")
