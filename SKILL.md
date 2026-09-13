@@ -17,7 +17,7 @@ description: Manage the user's mistake notebook (错题本) — record wrong pro
 ## 数据库位置
 
 默认 `~/.mistakebook/mistakebook.db`。可用 `--db PATH` 或 `$MISTAKEBOOK_DB` 覆盖。
-不确定时先运行 `mistakebook stats` 确认数据库可访问。
+不确定时先运行 `mistakebook --json stats` 确认数据库可访问。
 
 ## 核心命令
 
@@ -41,14 +41,19 @@ mistakebook --json search [--query 关键词] [--subject 学科] \
 # 详情（含全部复习历史）
 mistakebook --json show <id>
 
+# 修改 / 归档
+mistakebook --json update <id> [要修改的字段]
+mistakebook --json archive <id> [--unarchive]
+
 # 统计
 mistakebook --json stats
 
-# 导出
-mistakebook export --format json --output mistakes.json
+# 导出（写文件，同时以 JSON 返回导出状态）
+mistakebook --json export --format json --output mistakes.json
 ```
 
 所有命令带 `--json` 时输出结构化 JSON，直接解析，不要正则抓人类可读输出。
+业务错误同样输出 JSON 到 stderr，结构为 `{"error":{"code":"...","message":"..."}}`，并返回非零退出码。
 
 ## 工作流
 
@@ -66,7 +71,7 @@ mistakebook export --format json --output mistakes.json
    - 完全答对 → `correct`
    - 思路对但有瑕疵/需要提示 → `partial`
    - 答错或不会 → `wrong`，讲清楚错在哪
-4. 复习完用 `stats` 给个简短总结。
+4. 复习完用 `mistakebook --json stats` 给个简短总结。
 
 ## 注意
 
