@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.13"]
+        python-version: ["3.9", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -26,7 +26,15 @@ jobs:
           python -m pip install -e ".[dev]"
       - name: Run tests
         run: python -m pytest
-      - name: Verify installed CLI and package imports
+      - name: Build and verify wheel install
         run: |
+          rm -rf dist
+          python -m pip wheel . --no-deps --wheel-dir dist
+          python -m pip uninstall -y mistakebook
+          WHEEL=$(find dist -name 'mistakebook-*.whl' -print -quit)
+          python -m pip install "$WHEEL"
+          python -m pip check
+          TMPDIR=$(mktemp -d)
+          cd "$TMPDIR"
           mistakebook --help
           python -c "import mistakebook; import mistakebook.cli; import mistakebook.core; import mistakebook.scheduler"
