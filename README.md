@@ -51,6 +51,13 @@ mistakebook search --query "浮力"
 # 详情与复习历史
 mistakebook show 1
 
+# 修改错题
+mistakebook update 1 --analysis "补充完全平方公式推导"
+
+# 归档错题（恢复归档使用 --unarchive）
+mistakebook archive 1
+mistakebook archive 1 --unarchive
+
 # 统计
 mistakebook stats
 
@@ -79,6 +86,14 @@ mistakebook export --format json --output mistakes.json
 mistakebook --json due
 mistakebook --json add --subject 物理 --question "..." --answer "..."
 ```
+
+`--json` 模式下，成功结果输出结构化 JSON；业务错误也会输出 JSON 到 stderr，格式为：
+
+```json
+{"error":{"code":"...","message":"..."}}
+```
+
+并返回非零退出码，方便 agent 判断失败情况。
 
 仓库自带 `SKILL.md`——如果你的 agent 支持 skill 系统（如 Hermes Agent），
 把这个文件放进 skills 目录，agent 就能自己学会管理你的错题本。
